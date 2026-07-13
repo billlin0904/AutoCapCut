@@ -3345,7 +3345,7 @@ class MainWindow(QMainWindow):
             main_y,
             addr_y,
             self.current_video_template(),
-            True,
+            False,
             self.current_template_config(),
             motion,
             clip_progress,
@@ -3435,7 +3435,7 @@ class MainWindow(QMainWindow):
     def preview_loaded(self, image_path: str) -> None:
         if self.is_preview_playing():
             return
-        self.preview.set_background(image_path, has_captions=True)
+        self.preview.set_background(image_path, has_captions=False)
 
     def preview_failed(self, message: str) -> None:
         self.preview.set_background(None, has_captions=False)
