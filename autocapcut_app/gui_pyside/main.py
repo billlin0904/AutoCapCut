@@ -96,6 +96,8 @@ ASS_PREVIEW_FONT = "Noto Sans TC"
 ASS_MAIN_FONT_SIZE = 124
 ASS_ADDR_FONT_SIZE = 58
 ASS_OUTLINE = 10
+LOGO_PIXMAP_CACHE: dict[str, QPixmap] = {}
+SCALED_LOGO_PIXMAP_CACHE: dict[tuple[str, int], QPixmap] = {}
 
 
 def pixel_font(family: str, pixel_size: int, bold: bool = False) -> QFont:
@@ -106,18 +108,40 @@ def pixel_font(family: str, pixel_size: int, bold: bool = False) -> QFont:
 
 
 def transparent_logo_pixmap(path: Path) -> QPixmap:
+    cache_key = str(path.resolve()) if path.exists() else str(path)
+    cached = LOGO_PIXMAP_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
     image = QImage(str(path))
     if image.isNull():
         return QPixmap()
     if image.hasAlphaChannel():
-        return QPixmap.fromImage(image)
-    image = image.convertToFormat(QImage.Format_RGBA8888)
-    for y in range(image.height()):
-        for x in range(image.width()):
-            color = image.pixelColor(x, y)
-            alpha = 255 - max(color.red(), color.green(), color.blue())
-            image.setPixelColor(x, y, QColor(255, 255, 255, max(0, min(255, alpha))))
-    return QPixmap.fromImage(image)
+        pixmap = QPixmap.fromImage(image)
+    else:
+        image = image.convertToFormat(QImage.Format_RGBA8888)
+        for y in range(image.height()):
+            for x in range(image.width()):
+                color = image.pixelColor(x, y)
+                alpha = 255 - max(color.red(), color.green(), color.blue())
+                image.setPixelColor(x, y, QColor(255, 255, 255, max(0, min(255, alpha))))
+        pixmap = QPixmap.fromImage(image)
+    LOGO_PIXMAP_CACHE[cache_key] = pixmap
+    return pixmap
+
+
+def scaled_transparent_logo_pixmap(path: Path, size: int) -> QPixmap:
+    cache_key = str(path.resolve()) if path.exists() else str(path)
+    size = max(1, int(size))
+    scaled_key = (cache_key, size)
+    cached = SCALED_LOGO_PIXMAP_CACHE.get(scaled_key)
+    if cached is not None:
+        return cached
+    pixmap = transparent_logo_pixmap(path)
+    if pixmap.isNull():
+        return pixmap
+    scaled = pixmap.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    SCALED_LOGO_PIXMAP_CACHE[scaled_key] = scaled
+    return scaled
 
 
 def app_icon() -> QIcon:
@@ -560,10 +584,10 @@ class CaptionPreview(QOpenGLWidget):
             return
         platform = str(config.get("platform", "instagram") or "instagram").lower()
         logo_path = THREADS_LOGO_PATH if platform == "threads" else IG_LOGO_PATH
-        logo = transparent_logo_pixmap(logo_path) if logo_path.exists() else QPixmap()
         opacity = max(0.05, min(1.0, float(config.get("opacity", 0.85) or 0.85)))
         size = max(0.4, min(2.5, float(config.get("scale", 1.0) or 1.0)))
         logo_px = max(14, int(54 * size * scale))
+        logo = scaled_transparent_logo_pixmap(logo_path, logo_px) if logo_path.exists() else QPixmap()
         margin = 42 * scale
         gap = 12 * scale
         y_offset = float(config.get("y_offset", 40) or 0) * scale
@@ -597,8 +621,7 @@ class CaptionPreview(QOpenGLWidget):
         painter.save()
         painter.setOpacity(opacity)
         if not logo.isNull():
-            logo_scaled = logo.scaled(logo_px, logo_px, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            painter.drawPixmap(int(x), int(y + (block_h - logo_scaled.height()) / 2), logo_scaled)
+            painter.drawPixmap(int(x), int(y + (block_h - logo.height()) / 2), logo)
         text_rect = QRectF(x + logo_px + gap, y, text_w + 6 * scale, block_h)
         painter.setPen(QPen(QColor("#000000"), max(1, int(5 * scale))))
         painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, account)
