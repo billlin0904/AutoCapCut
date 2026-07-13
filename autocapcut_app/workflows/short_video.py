@@ -740,6 +740,21 @@ def _load_overlay_font(size: int):
     return ImageFont.load_default()
 
 
+def _load_copyright_logo_rgba(path: Path):
+    from PIL import Image
+
+    raw = Image.open(path)
+    if raw.mode == "RGBA":
+        alpha = raw.getchannel("A")
+        if alpha.getextrema()[0] < 255:
+            return raw
+    gray = raw.convert("L")
+    alpha = gray.point(lambda value: max(0, min(255, 255 - value)))
+    logo = Image.new("RGBA", raw.size, (255, 255, 255, 255))
+    logo.putalpha(alpha)
+    return logo
+
+
 def _render_copyright_overlay(job: ShortVideoJob, out: Path, log: LogFn | None) -> Path | None:
     config = _copyright_config(job)
     if not config:
@@ -752,7 +767,7 @@ def _render_copyright_overlay(job: ShortVideoJob, out: Path, log: LogFn | None) 
     from PIL import Image, ImageDraw
 
     overlay = Image.new("RGBA", (1080, 1920), (0, 0, 0, 0))
-    logo = Image.open(logo_path).convert("RGBA")
+    logo = _load_copyright_logo_rgba(logo_path)
     scale = float(config["scale"])
     opacity = float(config["opacity"])
     logo_px = max(36, int(72 * scale))

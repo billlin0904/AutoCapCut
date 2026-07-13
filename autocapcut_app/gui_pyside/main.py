@@ -105,6 +105,21 @@ def pixel_font(family: str, pixel_size: int, bold: bool = False) -> QFont:
     return font
 
 
+def transparent_logo_pixmap(path: Path) -> QPixmap:
+    image = QImage(str(path))
+    if image.isNull():
+        return QPixmap()
+    if image.hasAlphaChannel():
+        return QPixmap.fromImage(image)
+    image = image.convertToFormat(QImage.Format_RGBA8888)
+    for y in range(image.height()):
+        for x in range(image.width()):
+            color = image.pixelColor(x, y)
+            alpha = 255 - max(color.red(), color.green(), color.blue())
+            image.setPixelColor(x, y, QColor(255, 255, 255, max(0, min(255, alpha))))
+    return QPixmap.fromImage(image)
+
+
 def app_icon() -> QIcon:
     return QIcon(str(APP_ICON_PATH)) if APP_ICON_PATH.exists() else QIcon()
 
@@ -545,7 +560,7 @@ class CaptionPreview(QOpenGLWidget):
             return
         platform = str(config.get("platform", "instagram") or "instagram").lower()
         logo_path = THREADS_LOGO_PATH if platform == "threads" else IG_LOGO_PATH
-        logo = QPixmap(str(logo_path)) if logo_path.exists() else QPixmap()
+        logo = transparent_logo_pixmap(logo_path) if logo_path.exists() else QPixmap()
         opacity = max(0.05, min(1.0, float(config.get("opacity", 0.85) or 0.85)))
         size = max(0.4, min(2.5, float(config.get("scale", 1.0) or 1.0)))
         logo_px = max(14, int(54 * size * scale))
