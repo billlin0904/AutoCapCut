@@ -819,6 +819,7 @@ class AccurateTimelinePlaybackWorker(QObject):
                     name = parts[0].replace("Style:", "").strip().upper()
                     parts[1] = font
                     parts[2] = str(addr_size if name == "ADDR" else main_size)
+                    parts[14] = "1"
                     parts[15] = str(max(0, outline))
                     parts[16] = str(max(0, shadow))
                     line = ",".join(parts)
