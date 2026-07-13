@@ -2475,7 +2475,6 @@ class MainWindow(QMainWindow):
         if self.is_preview_playing():
             self.stop_preview_playback()
             self.set_play_button_state(False)
-            self.load_preview_for_timeline()
         else:
             self._preview_playing = True
             self.configure_preview_engine()
@@ -2515,13 +2514,27 @@ class MainWindow(QMainWindow):
     def update_playback_caption_overlay(self, timeline_sec: float) -> None:
         if not hasattr(self, "preview"):
             return
+        if hasattr(self, "main_y_spin"):
+            self.preview.set_positions(self.main_y_spin.value(), self.addr_y_spin.value())
+        template_name = self.current_video_template()
+        template_config = self.current_template_config()
+        caption_config = template_config.get("caption", {}) if isinstance(template_config, dict) else {}
+        self.preview.set_caption_style(
+            str(caption_config.get("font") or "Noto Sans TC"),
+            int(caption_config.get("main_size", ASS_MAIN_FONT_SIZE) or ASS_MAIN_FONT_SIZE),
+            int(caption_config.get("addr_size", ASS_ADDR_FONT_SIZE) or ASS_ADDR_FONT_SIZE),
+            int(caption_config.get("outline", ASS_OUTLINE) or 0),
+            int(caption_config.get("shadow", 0) or 0),
+        )
+        self.preview.set_template_name(template_name)
+        self.preview.set_copyright_config(template_config.get("copyright", {}) if isinstance(template_config, dict) else {})
         self.preview.set_timeline_seconds(timeline_sec)
         captions = self.caption_rows_with_table_rows() if hasattr(self, "caption_table") else []
         active = self.caption_at_output_time_with_row(captions, timeline_sec)
         active_row, caption = active if active is not None else (-1, {})
         self.preview.set_preview_kind(str(caption.get("kind", "main")))
         segments = self.normalize_segments(caption.get("segments", []))
-        segments = self.template_preview_segments(self.current_video_template(), segments, active_row)
+        segments = self.template_preview_segments(template_name, segments, active_row)
         self.preview.set_preview_segments(segments)
 
     def pyav_playback_failed(self, message: str) -> None:
