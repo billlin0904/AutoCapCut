@@ -307,6 +307,8 @@ class CaptionPreview(QOpenGLWidget):
         self.show_guides = False
         self.preview_text = "AutoCapCut"
         self.preview_segments: list[list[str]] = [["AutoCapCut", "y"]]
+        self.preview_main_segments: list[list[str]] = [["AutoCapCut", "y"]]
+        self.preview_addr_segments: list[list[str]] = []
         self.background: QPixmap | None = None
         self.background_has_captions = False
         self.copyright_config: dict = {}
@@ -340,6 +342,21 @@ class CaptionPreview(QOpenGLWidget):
 
     def set_preview_segments(self, segments: list[list[str]]) -> None:
         self.preview_segments = segments or []
+        if self.preview_kind == "addr":
+            self.preview_addr_segments = self.preview_segments
+        else:
+            self.preview_main_segments = self.preview_segments
+        self.preview_text = "".join(str(part[0]) for part in self.preview_segments if part)
+        self.update()
+
+    def set_preview_caption_groups(
+        self,
+        main_segments: list[list[str]] | None,
+        addr_segments: list[list[str]] | None,
+    ) -> None:
+        self.preview_main_segments = main_segments or []
+        self.preview_addr_segments = addr_segments or []
+        self.preview_segments = self.preview_main_segments or self.preview_addr_segments
         self.preview_text = "".join(str(part[0]) for part in self.preview_segments if part)
         self.update()
 
@@ -423,8 +440,8 @@ class CaptionPreview(QOpenGLWidget):
             painter.end()
             return
 
-        y_value = self.addr_y if self.preview_kind == "addr" else self.main_y
-        self._draw_caption(painter, left, top, canvas_w, scale, y_value, self.preview_segments)
+        self._draw_caption(painter, left, top, canvas_w, scale, self.main_y, self.preview_main_segments, "main")
+        self._draw_caption(painter, left, top, canvas_w, scale, self.addr_y, self.preview_addr_segments, "addr")
         self._draw_copyright(painter, left, top, canvas_w, canvas_h, scale)
         painter.end()
 
@@ -490,11 +507,12 @@ class CaptionPreview(QOpenGLWidget):
         scale: float,
         y_value: int,
         segments: list[list[str]],
+        kind: str = "main",
     ) -> None:
         if not segments:
             return
         y = top + y_value * scale
-        font_size = self.addr_font_size if self.preview_kind == "addr" else self.main_font_size
+        font_size = self.addr_font_size if kind == "addr" else self.main_font_size
         painter.setFont(pixel_font(self.caption_font, int(font_size * scale), True))
         text_h = max(80 * scale, font_size * scale * 1.4)
         text_rect = QRectF(left + 40 * scale, y - text_h / 2, width - 80 * scale, text_h)
@@ -2207,12 +2225,26 @@ class MainWindow(QMainWindow):
         self.preview.set_timeline_seconds(self.timeline_slider.value() / 1000.0 if hasattr(self, "timeline_slider") else 0.0)
         captions = self.caption_rows_with_table_rows() if hasattr(self, "caption_table") else []
         in_intro = self.rendered_to_source_seconds(self.timeline_slider.value() / 1000.0 if hasattr(self, "timeline_slider") else 0.0) is None
-        active = captions[0] if in_intro and captions else self.caption_at_timeline_time_with_row(captions)
-        active_row, first = active if active is not None else (-1, {})
-        self.preview.set_preview_kind(str(first.get("kind", "main")))
-        segments = self.normalize_segments(first.get("segments", []))
-        segments = self.template_preview_segments(template_name, segments, active_row)
-        self.preview.set_preview_segments(segments)
+        if in_intro and captions:
+            active_row, first = captions[0]
+            self.preview.set_preview_kind(str(first.get("kind", "main")))
+            segments = self.normalize_segments(first.get("segments", []))
+            self.preview.set_preview_caption_groups(
+                self.template_preview_segments(template_name, segments, active_row),
+                [],
+            )
+        else:
+            groups = self.caption_groups_at_output_time_with_rows(
+                captions,
+                self.timeline_slider.value() / 1000.0 if hasattr(self, "timeline_slider") else 0.0,
+            )
+            main_row, main = groups.get("main", (-1, {}))
+            addr_row, addr = groups.get("addr", (-1, {}))
+            self.preview.set_preview_kind("main" if main else "addr")
+            self.preview.set_preview_caption_groups(
+                self.template_preview_segments(template_name, self.normalize_segments(main.get("segments", [])), main_row),
+                self.template_preview_segments(template_name, self.normalize_segments(addr.get("segments", [])), addr_row),
+            )
 
     def current_video_template(self) -> str:
         if hasattr(self, "video_template_combo"):
@@ -2306,6 +2338,32 @@ class MainWindow(QMainWindow):
             if start <= source_time <= end:
                 return row, caption
         return None
+
+    def caption_groups_at_output_time_with_rows(
+        self,
+        captions: list[dict] | list[tuple[int, dict]],
+        output_time: float,
+    ) -> dict[str, tuple[int, dict]]:
+        source_time = self.rendered_to_source_seconds(output_time)
+        if source_time is None:
+            return {}
+        groups: dict[str, tuple[int, dict]] = {}
+        for order, item in enumerate(captions):
+            if isinstance(item, tuple):
+                row, caption = item
+            else:
+                row, caption = order, item
+            try:
+                start = float(caption.get("start", 0.0))
+                end = float(caption.get("end", start))
+            except (TypeError, ValueError):
+                continue
+            if not (start <= source_time <= end):
+                continue
+            kind = str(caption.get("kind", "main"))
+            if kind in KIND_OPTIONS and kind not in groups:
+                groups[kind] = (row, caption)
+        return groups
 
     def clip_rows(self) -> list[dict]:
         rows = []
@@ -2568,12 +2626,14 @@ class MainWindow(QMainWindow):
         self.preview.set_copyright_config(template_config.get("copyright", {}) if isinstance(template_config, dict) else {})
         self.preview.set_timeline_seconds(timeline_sec)
         captions = self.caption_rows_with_table_rows() if hasattr(self, "caption_table") else []
-        active = self.caption_at_output_time_with_row(captions, timeline_sec)
-        active_row, caption = active if active is not None else (-1, {})
-        self.preview.set_preview_kind(str(caption.get("kind", "main")))
-        segments = self.normalize_segments(caption.get("segments", []))
-        segments = self.template_preview_segments(template_name, segments, active_row)
-        self.preview.set_preview_segments(segments)
+        groups = self.caption_groups_at_output_time_with_rows(captions, timeline_sec)
+        main_row, main = groups.get("main", (-1, {}))
+        addr_row, addr = groups.get("addr", (-1, {}))
+        self.preview.set_preview_kind("main" if main else "addr")
+        self.preview.set_preview_caption_groups(
+            self.template_preview_segments(template_name, self.normalize_segments(main.get("segments", [])), main_row),
+            self.template_preview_segments(template_name, self.normalize_segments(addr.get("segments", [])), addr_row),
+        )
 
     def pyav_playback_failed(self, message: str) -> None:
         self.append_log("PreviewEngine playback failed")
