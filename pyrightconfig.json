@@ -1,0 +1,8 @@
+{
+  "venvPath": "C:\\Users\\User\\anaconda3\\envs",
+  "venv": "AutoCapCut",
+  "extraPaths": [
+    ".",
+    "video-autopilot-kit/src"
+  ]
+}

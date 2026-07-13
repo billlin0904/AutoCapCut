@@ -1,0 +1,34 @@
+{
+  "id": "basic_subtitle",
+  "name": "Basic Subtitle",
+  "best_for": "Fast clipping",
+  "includes": "Captions, BGM",
+  "description": "Clean 9:16 short with source clips, subtitles, and music.",
+  "intro": {
+    "enabled": false,
+    "duration": 0.0,
+    "type": "none"
+  },
+  "caption": {
+    "font": "Noto Sans TC",
+    "main_size": 124,
+    "addr_size": 58,
+    "outline": 10,
+    "shadow": 2,
+    "main_y": 1180,
+    "addr_y": 1390,
+    "color_strategy": "manual"
+  },
+  "video": {
+    "grade": "none",
+    "transition": "xfade",
+    "transition_duration": 0.8,
+    "preview_fps": 12
+  },
+  "audio": {
+    "volume": 0.42,
+    "fade": 3.2,
+    "bgm_start": "auto",
+    "bgm_start_seconds": 0.0
+  }
+}

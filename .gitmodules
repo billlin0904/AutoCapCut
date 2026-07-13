@@ -1,0 +1,3 @@
+[submodule "video-autopilot-kit"]
+	path = video-autopilot-kit
+	url = https://github.com/Hao0321/video-autopilot-kit.git

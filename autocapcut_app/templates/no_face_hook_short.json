@@ -1,0 +1,17 @@
+{
+  "id": "no_face_hook_short",
+  "name": "No-face Hook Short",
+  "intro": { "enabled": true, "duration": 3.0, "type": "hook_card" },
+  "caption": {
+    "font": "Noto Sans TC",
+    "main_size": 124,
+    "addr_size": 58,
+    "outline": 10,
+    "shadow": 0,
+    "main_y": 1180,
+    "addr_y": 1390,
+    "color_strategy": "manual"
+  },
+  "video": { "grade": "none", "transition": "hard_cut", "transition_duration": 0.8, "preview_fps": 12 },
+  "audio": { "bgm_start": "auto", "bgm_start_seconds": 0.0, "volume": 0.42, "fade": 1.2 }
+}

@@ -1,0 +1,38 @@
+{
+  "id": "food_travel_short",
+  "name": "Food/Travel Short",
+  "best_for": "Food, travel, silent vlog",
+  "includes": "Mood captions, BGM, soft motion",
+  "description": "Designed for visual-first clips with music, place/product moments, and simple punchy captions.",
+  "intro": {
+    "enabled": false,
+    "duration": 0.0,
+    "type": "none",
+    "niche": "travel",
+    "formula": "mistake_warning",
+    "hook_text": "",
+    "badge_text": ""
+  },
+  "caption": {
+    "font": "Noto Sans TC",
+    "main_size": 124,
+    "addr_size": 58,
+    "outline": 10,
+    "shadow": 0,
+    "main_y": 1180,
+    "addr_y": 1390,
+    "color_strategy": "food_travel_accent"
+  },
+  "video": {
+    "grade": "none",
+    "transition": "xfade",
+    "transition_duration": 1.2,
+    "preview_fps": 12
+  },
+  "audio": {
+    "volume": 0.42,
+    "fade": 1.2,
+    "bgm_start": "auto",
+    "bgm_start_seconds": 0.0
+  }
+}

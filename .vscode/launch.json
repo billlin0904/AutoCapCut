@@ -1,0 +1,22 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "AutoCapCut GUI (Conda)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "autocapcut_app",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "python": "C:\\Users\\User\\anaconda3\\envs\\AutoCapCut\\python.exe",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder};${workspaceFolder}\\video-autopilot-kit\\src",
+        "PYTHONIOENCODING": "utf-8",
+        "QT_PLUGIN_PATH": "C:\\Users\\User\\anaconda3\\envs\\AutoCapCut\\Lib\\site-packages\\PySide6\\plugins",
+        "QML2_IMPORT_PATH": "C:\\Users\\User\\anaconda3\\envs\\AutoCapCut\\Lib\\site-packages\\PySide6\\qml",
+        "PATH": "C:\\Users\\User\\anaconda3\\envs\\AutoCapCut;C:\\Users\\User\\anaconda3\\envs\\AutoCapCut\\Scripts;C:\\Users\\User\\anaconda3\\envs\\AutoCapCut\\Library\\bin;C:\\Users\\User\\anaconda3\\envs\\AutoCapCut\\Library\\usr\\bin;C:\\Users\\User\\anaconda3\\envs\\AutoCapCut\\DLLs;${env:PATH}"
+      }
+    }
+  ]
+}

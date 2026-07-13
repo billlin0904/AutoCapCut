@@ -1,0 +1,5 @@
+PySide6==6.7.3
+PySide6-Fluent-Widgets==1.11.2
+pillow
+numpy
+faster-whisper
