@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import OrderedDict
 import time
 import subprocess
 import tempfile
@@ -7,13 +8,13 @@ import traceback
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QObject, Signal, Slot
+from PySide6.QtCore import QObject, QTimer, Signal, Slot
 from PySide6.QtGui import QImage
 
 from autocapcut_app.core.template_config import normalize_template_config
 from autocapcut_app.core.video_grade import video_grade_filter
 from autocapcut_app.paths import ensure_vendor_on_path
-from autocapcut_app.core.preview import extract_preview_frame, render_ass_preview_frame
+from autocapcut_app.core.preview import extract_preview_frame, render_ass_preview_frame, render_hook_preview_frame
 from autocapcut_app.workflows.short_video import _ass_filter, parse_job, run_short_video_job
 
 
@@ -133,6 +134,274 @@ class PreviewFrameWorker(QObject):
             self.finished.emit(str(frame))
         except Exception as exc:
             self.failed.emit(f"{exc}\n\n{traceback.format_exc()}")
+
+
+class PreviewEngineWorker(QObject):
+    frame_ready = Signal(QImage, float)
+    time_ready = Signal(float)
+    finished = Signal()
+    failed = Signal(str)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.config: dict[str, Any] = {}
+        self.fps = 12.0
+        self.duration = 0.0
+        self._timer: QTimer | None = None
+        self._playing = False
+        self._current_timeline = 0.0
+        self._audio_timeline: float | None = None
+        self._last_clock = time.perf_counter()
+        self._pending_seek: float | None = None
+        self._last_render_key = ""
+        self._cache: OrderedDict[str, QImage] = OrderedDict()
+        self._cache_limit = 72
+
+    @Slot()
+    def start(self) -> None:
+        if self._timer is not None:
+            return
+        self._timer = QTimer(self)
+        self._timer.setInterval(max(15, int(1000 / self.fps)))
+        self._timer.timeout.connect(self._tick)
+        self._timer.start()
+
+    @Slot(object)
+    def configure(self, config: object) -> None:
+        self.config = dict(config) if isinstance(config, dict) else {}
+        self.fps = max(1.0, float(self.config.get("fps", 12.0) or 12.0))
+        self.duration = max(0.0, float(self.config.get("duration", 0.0) or 0.0))
+        if self._timer is not None:
+            self._timer.setInterval(max(15, int(1000 / self.fps)))
+        self._last_render_key = ""
+
+    @Slot(float)
+    def play(self, timeline_sec: float) -> None:
+        self._playing = True
+        self._audio_timeline = None
+        self._current_timeline = self._clamp_time(timeline_sec)
+        self._pending_seek = self._current_timeline
+        self._last_clock = time.perf_counter()
+
+    @Slot()
+    def pause(self) -> None:
+        self._playing = False
+        self._audio_timeline = None
+
+    @Slot(float)
+    def seek(self, timeline_sec: float) -> None:
+        self._pending_seek = self._clamp_time(timeline_sec)
+        self._audio_timeline = None
+
+    @Slot(float)
+    def set_audio_timeline(self, timeline_sec: float) -> None:
+        if self._playing:
+            self._audio_timeline = self._clamp_time(timeline_sec)
+
+    @Slot()
+    def stop(self) -> None:
+        self._playing = False
+        self._audio_timeline = None
+        if self._timer is not None:
+            self._timer.stop()
+
+    def _tick(self) -> None:
+        try:
+            target = self._next_target_time()
+            if target is None:
+                return
+            self._current_timeline = target
+            self.time_ready.emit(target)
+            image = self._render_timeline_frame(target)
+            if image is not None:
+                self.frame_ready.emit(image, target)
+            if self._playing and self.duration > 0 and target >= self.duration - 0.001:
+                self._playing = False
+                self.finished.emit()
+        except Exception as exc:
+            self._playing = False
+            self.failed.emit(f"{exc}\n\n{traceback.format_exc()}")
+
+    def _next_target_time(self) -> float | None:
+        now = time.perf_counter()
+        if self._pending_seek is not None:
+            target = self._pending_seek
+            self._pending_seek = None
+            self._last_clock = now
+            return target
+        if not self._playing:
+            return None
+        if self._audio_timeline is not None:
+            return self._audio_timeline
+        elapsed = max(0.0, now - self._last_clock)
+        self._last_clock = now
+        return self._clamp_time(self._current_timeline + elapsed)
+
+    def _render_timeline_frame(self, timeline_sec: float) -> QImage | None:
+        detail = self._clip_detail_at_timeline_time(timeline_sec)
+        if detail is None:
+            return self._render_intro_frame(timeline_sec)
+        clip, start, clip_progress = detail
+        clip_path = Path(str(clip.get("path", "")))
+        if not clip_path.exists():
+            return None
+        caption = self._caption_at_output_time(timeline_sec) or {}
+        segments = self._normalize_segments(caption.get("segments", []))
+        kind = str(caption.get("kind", "main"))
+        render_time = self._quantize(start)
+        key = self._frame_key(clip_path, render_time, segments, kind, clip, clip_progress)
+        if key == self._last_render_key:
+            return None
+        cached = self._cache.get(key)
+        if cached is not None:
+            self._cache.move_to_end(key)
+            self._last_render_key = key
+            return cached
+        frame_path = render_ass_preview_frame(
+            clip_path,
+            render_time,
+            segments=segments,
+            kind=kind,
+            main_y=int(self.config.get("main_y", 1180) or 1180),
+            addr_y=int(self.config.get("addr_y", 1390) or 1390),
+            video_template=str(self.config.get("video_template", "Basic Subtitle") or "Basic Subtitle"),
+            template_config=self.config.get("template_config") if isinstance(self.config.get("template_config"), dict) else {},
+            motion=str(clip.get("motion", "none")),
+            clip_progress=clip_progress,
+            font_dir=Path(str(self.config.get("font_dir", ""))).expanduser() if self.config.get("font_dir") else None,
+        )
+        image = QImage(str(frame_path))
+        if image.isNull():
+            return None
+        self._remember_frame(key, image)
+        self._last_render_key = key
+        return image
+
+    def _render_intro_frame(self, timeline_sec: float) -> QImage | None:
+        intro = self.config.get("intro", {}) if isinstance(self.config.get("intro"), dict) else {}
+        if not bool(intro.get("enabled", False)) or str(intro.get("type", "")).lower() != "hook_card":
+            return None
+        key = f"intro|{timeline_sec:.2f}|{intro!r}"
+        if key == self._last_render_key:
+            return None
+        cached = self._cache.get(key)
+        if cached is not None:
+            self._cache.move_to_end(key)
+            self._last_render_key = key
+            return cached
+        frame_path = render_hook_preview_frame(
+            str(intro.get("hook_text") or self.config.get("hook_title") or "今天的重點"),
+            str(intro.get("niche") or "teaching"),
+            badge_text=str(intro.get("badge_text") or ""),
+        )
+        image = QImage(str(frame_path))
+        if image.isNull():
+            return None
+        self._remember_frame(key, image)
+        self._last_render_key = key
+        return image
+
+    def _clip_detail_at_timeline_time(self, timeline_sec: float) -> tuple[dict, float, float] | None:
+        source_sec = self._rendered_to_source_seconds(timeline_sec)
+        if source_sec is None:
+            return None
+        cursor = 0.0
+        for clip in self.config.get("clips", []) or []:
+            duration = max(0.0, float(clip.get("duration", 0.0) or 0.0))
+            if duration <= 0:
+                continue
+            if cursor <= source_sec <= cursor + duration or source_sec < cursor + duration:
+                offset = max(0.0, min(duration, source_sec - cursor))
+                start = max(0.0, float(clip.get("start", 0.0) or 0.0)) + offset
+                progress = 0.0 if duration <= 0 else offset / duration
+                return clip, start, progress
+            cursor += duration
+        return None
+
+    def _caption_at_output_time(self, timeline_sec: float) -> dict | None:
+        source_sec = self._rendered_to_source_seconds(timeline_sec)
+        if source_sec is None:
+            return None
+        for caption in self.config.get("captions", []) or []:
+            try:
+                start = float(caption.get("start", 0.0) or 0.0)
+                end = float(caption.get("end", start) or start)
+            except (TypeError, ValueError):
+                continue
+            if start <= source_sec <= end:
+                return caption
+        return None
+
+    def _rendered_to_source_seconds(self, timeline_sec: float) -> float | None:
+        intro = max(0.0, float(self.config.get("intro_seconds", 0.0) or 0.0))
+        if timeline_sec < intro:
+            return None
+        return max(0.0, timeline_sec - intro)
+
+    def _frame_key(
+        self,
+        clip_path: Path,
+        timestamp: float,
+        segments: list[list[str]],
+        kind: str,
+        clip: dict,
+        progress: float,
+    ) -> str:
+        stat = ""
+        try:
+            info = clip_path.stat()
+            stat = f"{info.st_mtime_ns}:{info.st_size}"
+        except OSError:
+            pass
+        return "|".join(
+            [
+                str(clip_path),
+                stat,
+                f"{timestamp:.3f}",
+                repr(segments),
+                kind,
+                str(self.config.get("main_y", 1180)),
+                str(self.config.get("addr_y", 1390)),
+                str(self.config.get("video_template", "Basic Subtitle")),
+                repr(self.config.get("template_config", {})),
+                str(self.config.get("font_dir", "")),
+                str(clip.get("motion", "none")),
+                f"{progress:.3f}",
+            ]
+        )
+
+    def _remember_frame(self, key: str, image: QImage) -> None:
+        self._cache[key] = image
+        self._cache.move_to_end(key)
+        while len(self._cache) > self._cache_limit:
+            self._cache.popitem(last=False)
+
+    def _quantize(self, value: float) -> float:
+        fps = max(1.0, self.fps)
+        return round(max(0.0, value) * fps) / fps
+
+    def _clamp_time(self, value: float) -> float:
+        value = max(0.0, float(value))
+        if self.duration > 0:
+            return min(value, self.duration)
+        return value
+
+    @staticmethod
+    def _normalize_segments(segments: object) -> list[list[str]]:
+        out: list[list[str]] = []
+        for segment in segments or []:
+            if isinstance(segment, dict):
+                text = str(segment.get("text", ""))
+                color = str(segment.get("color", "w"))
+            elif isinstance(segment, (list, tuple)) and segment:
+                text = str(segment[0])
+                color = str(segment[1]) if len(segment) > 1 else "w"
+            else:
+                text = str(segment)
+                color = "w"
+            if text:
+                out.append([text, color])
+        return out
 
 
 class PyAVTimelinePlaybackWorker(QObject):

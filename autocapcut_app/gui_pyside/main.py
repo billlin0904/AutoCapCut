@@ -56,9 +56,8 @@ from qfluentwidgets import (
 from autocapcut_app.core.template_config import TEMPLATE_DIR, load_template_configs, normalize_template_config, template_key
 from autocapcut_app.core.preview import extract_preview_frame, render_hook_preview_frame
 from autocapcut_app.gui_pyside.workers import (
-    AccurateTimelinePlaybackWorker,
     PreviewFrameWorker,
-    PyAVTimelinePlaybackWorker,
+    PreviewEngineWorker,
     ShortVideoWorker,
 )
 
@@ -803,6 +802,13 @@ class CaptionBlockDelegate(TableItemDelegate):
 
 
 class MainWindow(QMainWindow):
+    preview_engine_configure = Signal(object)
+    preview_engine_play = Signal(float)
+    preview_engine_pause = Signal()
+    preview_engine_seek = Signal(float)
+    preview_engine_audio_position = Signal(float)
+    preview_engine_stop = Signal()
+
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("AutoCapCut - Short Video MVP")
@@ -814,26 +820,22 @@ class MainWindow(QMainWindow):
         self._worker: ShortVideoWorker | None = None
         self._preview_thread: QThread | None = None
         self._preview_worker: PreviewFrameWorker | None = None
-        self._pyav_thread: QThread | None = None
-        self._pyav_worker: AccurateTimelinePlaybackWorker | PyAVTimelinePlaybackWorker | None = None
+        self._preview_engine_thread: QThread | None = None
+        self._preview_engine_worker: PreviewEngineWorker | None = None
         self._preview_playing = False
         self._preview_clip_key: str | None = None
         self._pending_preview_request: tuple[str, float, list[list[str]], str, int, int, str, bool, dict, str, float] | None = None
         self._preview_timer = QTimer(self)
         self._preview_timer.setSingleShot(True)
         self._preview_timer.timeout.connect(self.load_preview_for_timeline)
-        self._playback_preview_timer = QTimer(self)
-        self._playback_preview_timer.setInterval(700)
-        self._playback_preview_timer.timeout.connect(self.load_preview_for_timeline)
-        self._play_timer = QTimer(self)
-        self._play_timer.setInterval(33)
-        self._play_timer.timeout.connect(self.advance_preview_playback)
         self.audio_output = QAudioOutput(self)
         self.audio_output.setVolume(0.85)
         self._last_preview_volume = 85
         self.media_player = QMediaPlayer(self)
         self.media_player.setAudioOutput(self.audio_output)
+        self.media_player.positionChanged.connect(self.preview_audio_position_changed)
         self._audio_clip_path: str | None = None
+        self._preview_audio_master_is_timeline = False
         self._preview_source_audio_key: str | None = None
         self._preview_source_audio_path: Path | None = None
         self.render_settings_dialog: QDialog | None = None
@@ -844,6 +846,7 @@ class MainWindow(QMainWindow):
         self.last_output: Path | None = None
         self.current_project_path: Path | None = None
         self.current_project_root: Path | None = None
+        self.start_preview_engine()
         self._build_ui()
 
     def _make_scroll_panel(self, widget: QWidget) -> QScrollArea:
@@ -2148,7 +2151,7 @@ class MainWindow(QMainWindow):
         del args
         if not hasattr(self, "preview") or not hasattr(self, "main_y_spin"):
             return
-        if self.is_preview_playing() and self._pyav_thread is not None:
+        if self.is_preview_playing():
             return
         self.preview.set_positions(self.main_y_spin.value(), self.addr_y_spin.value())
         template_name = self.current_video_template()
@@ -2383,14 +2386,87 @@ class MainWindow(QMainWindow):
         elif sync_audio and self.is_preview_playing():
             self.sync_preview_audio(force=True)
 
+    def start_preview_engine(self) -> None:
+        if self._preview_engine_thread is not None:
+            return
+        thread = QThread(self)
+        worker = PreviewEngineWorker()
+        self._preview_engine_thread = thread
+        self._preview_engine_worker = worker
+        worker.moveToThread(thread)
+        thread.started.connect(worker.start)
+        self.preview_engine_configure.connect(worker.configure)
+        self.preview_engine_play.connect(worker.play)
+        self.preview_engine_pause.connect(worker.pause)
+        self.preview_engine_seek.connect(worker.seek)
+        self.preview_engine_audio_position.connect(worker.set_audio_timeline)
+        self.preview_engine_stop.connect(worker.stop)
+        worker.frame_ready.connect(self.preview_playback_frame_ready)
+        worker.time_ready.connect(self.preview_engine_time_ready)
+        worker.finished.connect(self.preview_engine_finished)
+        worker.failed.connect(self.pyav_playback_failed)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(lambda thread=thread: self._clear_preview_engine_thread(thread))
+        thread.start()
+
+    def configure_preview_engine(self) -> None:
+        template_config = self.current_template_config()
+        intro = template_config.get("intro", {}) if isinstance(template_config, dict) else {}
+        hook_title = ""
+        captions = self.caption_rows_for_render_preview()
+        if captions:
+            hook_title = caption_text_from_segments(self.normalize_segments(captions[0].get("segments", [])))
+        config = {
+            "clips": self.clip_rows(),
+            "captions": captions,
+            "intro_seconds": self.template_intro_seconds(),
+            "intro": dict(intro) if isinstance(intro, dict) else {},
+            "hook_title": hook_title,
+            "duration": self.total_timeline_seconds(),
+            "main_y": self.main_y_spin.value() if hasattr(self, "main_y_spin") else 1180,
+            "addr_y": self.addr_y_spin.value() if hasattr(self, "addr_y_spin") else 1390,
+            "video_template": self.current_video_template(),
+            "template_config": template_config,
+            "font_dir": self.font_folder_edit.text().strip() if hasattr(self, "font_folder_edit") else "",
+            "fps": float(template_config.get("video", {}).get("preview_fps", 12) or 12)
+            if isinstance(template_config, dict)
+            else 12.0,
+        }
+        self.preview_engine_configure.emit(config)
+
+    def preview_audio_position_changed(self, position_ms: int) -> None:
+        if self.is_preview_playing() and self._preview_audio_master_is_timeline:
+            self.preview_engine_audio_position.emit(max(0.0, position_ms / 1000.0))
+
+    def preview_engine_time_ready(self, timeline_sec: float) -> None:
+        if not self.is_preview_playing():
+            return
+        timeline_ms = int(max(0.0, timeline_sec) * 1000)
+        timeline_ms = max(self.timeline_slider.minimum(), min(self.timeline_slider.maximum(), timeline_ms))
+        if self.timeline_slider.value() != timeline_ms:
+            self.timeline_slider.blockSignals(True)
+            self.timeline_slider.setValue(timeline_ms)
+            self.timeline_slider.blockSignals(False)
+            self.update_time_label()
+
+    def preview_engine_finished(self) -> None:
+        self.media_player.pause()
+        self._preview_playing = False
+        self.set_play_button_state(False)
+        self.load_preview_for_timeline()
+
+    def _clear_preview_engine_thread(self, thread: QThread) -> None:
+        if self._preview_engine_thread is thread:
+            self._preview_engine_thread = None
+            self._preview_engine_worker = None
+
     def handle_manual_seek(self) -> None:
         self._preview_clip_key = None
+        timeline_sec = self.timeline_slider.value() / 1000.0 if hasattr(self, "timeline_slider") else 0.0
         if self.is_preview_playing():
-            self.stop_pyav_playback()
             self.sync_preview_audio(force=True)
-            self.start_pyav_playback()
-            if self._pyav_thread is None:
-                self.load_preview_for_timeline()
+            self.configure_preview_engine()
+            self.preview_engine_seek.emit(timeline_sec)
         else:
             self.load_preview_for_timeline()
 
@@ -2401,109 +2477,24 @@ class MainWindow(QMainWindow):
             self.load_preview_for_timeline()
         else:
             self._preview_playing = True
+            self.configure_preview_engine()
             self.sync_preview_audio(force=True)
-            self.start_pyav_playback()
+            self.preview_engine_play.emit(self.timeline_slider.value() / 1000.0)
             self.set_play_button_state(True)
 
     def is_preview_playing(self) -> bool:
-        return self._preview_playing or self._pyav_thread is not None or self._play_timer.isActive()
+        return self._preview_playing
 
     def stop_preview_playback(self) -> None:
         self._preview_playing = False
-        self._play_timer.stop()
-        self._playback_preview_timer.stop()
-        self.stop_pyav_playback()
+        self.preview_engine_pause.emit()
         self.media_player.pause()
         self.set_play_button_state(False)
-
-    def advance_preview_playback(self) -> None:
-        if self.timeline_slider.value() >= self.timeline_slider.maximum():
-            self._play_timer.stop()
-            self._playback_preview_timer.stop()
-            self.stop_pyav_playback()
-            self.media_player.pause()
-            self._preview_playing = False
-            self.set_play_button_state(False)
-            self.load_preview_for_timeline()
-            return
-        if self._pyav_thread is None and self.rendered_to_source_seconds(self.timeline_slider.value() / 1000.0) is not None:
-            self._playback_preview_timer.stop()
-            self.start_pyav_playback()
-        self.step_timeline(self._play_timer.interval() / 1000.0, sync_audio=False, refresh_preview=False)
-        self.sync_preview_audio(force=False)
-
-    def start_pyav_playback(self) -> None:
-        self.stop_pyav_playback()
-        if self._pyav_thread is not None:
-            self._playback_preview_timer.start()
-            return
-        source_seconds = self.rendered_to_source_seconds(self.timeline_slider.value() / 1000.0)
-        if source_seconds is None:
-            self._play_timer.start()
-            self._playback_preview_timer.start()
-            return
-        clips = self.clip_rows()
-        if not clips:
-            self._play_timer.start()
-            self._playback_preview_timer.start()
-            return
-
-        thread = QThread(self)
-        worker = AccurateTimelinePlaybackWorker(
-            clips,
-            self.caption_rows_for_render_preview(),
-            source_seconds,
-            main_y=self.main_y_spin.value() if hasattr(self, "main_y_spin") else 1180,
-            addr_y=self.addr_y_spin.value() if hasattr(self, "addr_y_spin") else 1390,
-            video_template=self.current_video_template(),
-            template_config=self.current_template_config(),
-            font_dir=self.font_folder_edit.text().strip() if hasattr(self, "font_folder_edit") else "",
-            fps=float(self.current_template_config().get("video", {}).get("preview_fps", 12) or 12),
-        )
-        self._pyav_thread = thread
-        self._pyav_worker = worker
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.frame_ready.connect(self.preview_playback_frame_ready)
-        worker.failed.connect(self.pyav_playback_failed)
-        worker.finished.connect(thread.quit)
-        worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(lambda thread=thread: self._clear_pyav_thread(thread))
-        thread.start()
-
-    def stop_pyav_playback(self, wait: bool = True) -> None:
-        worker = self._pyav_worker
-        thread = self._pyav_thread
-        if worker is not None:
-            try:
-                worker.stop()
-            except RuntimeError:
-                pass
-        if wait and thread is not None:
-            try:
-                thread.quit()
-                if thread.isRunning() and not thread.wait(1500):
-                    return
-            except RuntimeError:
-                pass
-        self._pyav_worker = None
-        self._pyav_thread = None
-
-    def _clear_pyav_thread(self, thread: QThread) -> None:
-        if self._pyav_thread is thread:
-            self._pyav_thread = None
-            self._pyav_worker = None
-            if not self._play_timer.isActive():
-                self.media_player.pause()
-                self._preview_playing = False
-                self.set_play_button_state(False)
-                self.load_preview_for_timeline()
 
     def preview_playback_frame_ready(self, image: QImage, source_seconds: float) -> None:
         if not self.is_preview_playing():
             return
-        timeline_ms = int((self.template_intro_seconds() + source_seconds) * 1000)
+        timeline_ms = int(source_seconds * 1000)
         timeline_ms = max(self.timeline_slider.minimum(), min(self.timeline_slider.maximum(), timeline_ms))
         if self.timeline_slider.value() != timeline_ms:
             self.timeline_slider.blockSignals(True)
@@ -2512,8 +2503,7 @@ class MainWindow(QMainWindow):
             self.update_time_label()
         self.preview.set_background_image(image, has_captions=True)
         if timeline_ms >= self.timeline_slider.maximum():
-            self._playback_preview_timer.stop()
-            self.stop_pyav_playback(wait=False)
+            self.preview_engine_pause.emit()
             self.media_player.pause()
             self._preview_playing = False
             self.set_play_button_state(False)
@@ -2532,11 +2522,9 @@ class MainWindow(QMainWindow):
         self.preview.set_preview_segments(segments)
 
     def pyav_playback_failed(self, message: str) -> None:
-        self.append_log("Accurate preview playback failed; falling back to throttled still preview")
+        self.append_log("PreviewEngine playback failed")
         self.append_log(message.splitlines()[0] if message else "Unknown PyAV playback error")
-        if self.is_preview_playing():
-            self._play_timer.start()
-            self._playback_preview_timer.start()
+        self.stop_preview_playback()
 
     def set_play_button_state(self, playing: bool) -> None:
         self.play_button.setIcon(FIF.PAUSE if playing else FIF.PLAY)
@@ -2695,9 +2683,11 @@ class MainWindow(QMainWindow):
 
     def sync_preview_audio(self, force: bool = False) -> None:
         if self.sync_preview_bgm(force=force):
+            self._preview_audio_master_is_timeline = False
             return
         path = self.preview_source_audio_path()
         if path is None or not path.exists():
+            self._preview_audio_master_is_timeline = False
             self.media_player.pause()
             return
         source_key = f"source-timeline|{path}"
@@ -2705,6 +2695,7 @@ class MainWindow(QMainWindow):
             self.media_player.setSource(QUrl.fromLocalFile(str(path)))
             self._audio_clip_path = source_key
             force = True
+        self._preview_audio_master_is_timeline = True
         target_ms = max(0, self.timeline_slider.value() if hasattr(self, "timeline_slider") else 0)
         if force or abs(self.media_player.position() - target_ms) > 500:
             self.media_player.setPosition(target_ms)
@@ -2719,6 +2710,7 @@ class MainWindow(QMainWindow):
         path = Path(bgm_path)
         if not path.exists():
             return False
+        self._preview_audio_master_is_timeline = False
         source_key = f"bgm|{path}"
         if self._audio_clip_path != source_key:
             self.media_player.setSource(QUrl.fromLocalFile(str(path)))
@@ -3425,7 +3417,7 @@ class MainWindow(QMainWindow):
                 )
 
     def preview_loaded(self, image_path: str) -> None:
-        if self.is_preview_playing() and self._pyav_thread is not None:
+        if self.is_preview_playing():
             return
         self.preview.set_background(image_path, has_captions=True)
 
@@ -3925,6 +3917,13 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self.stop_preview_playback()
+        self.preview_engine_stop.emit()
+        if self._preview_engine_thread is not None:
+            try:
+                self._preview_engine_thread.quit()
+                self._preview_engine_thread.wait(1200)
+            except RuntimeError:
+                pass
         super().closeEvent(event)
 
     def render_finished(self, output: str) -> None:
