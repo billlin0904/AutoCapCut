@@ -156,6 +156,10 @@ class PreviewEngineWorker(QObject):
         self._last_render_key = ""
         self._cache: OrderedDict[str, QImage] = OrderedDict()
         self._cache_limit = 72
+        self._container = None
+        self._stream = None
+        self._container_path = ""
+        self._last_source_time = -1.0
 
     @Slot()
     def start(self) -> None:
@@ -174,6 +178,7 @@ class PreviewEngineWorker(QObject):
         if self._timer is not None:
             self._timer.setInterval(max(15, int(1000 / self.fps)))
         self._last_render_key = ""
+        self._close_container()
 
     @Slot(float)
     def play(self, timeline_sec: float) -> None:
@@ -204,6 +209,7 @@ class PreviewEngineWorker(QObject):
         self._audio_timeline = None
         if self._timer is not None:
             self._timer.stop()
+        self._close_container()
 
     def _tick(self) -> None:
         try:
@@ -245,11 +251,8 @@ class PreviewEngineWorker(QObject):
         clip_path = Path(str(clip.get("path", "")))
         if not clip_path.exists():
             return None
-        caption = self._caption_at_output_time(timeline_sec) or {}
-        segments = self._normalize_segments(caption.get("segments", []))
-        kind = str(caption.get("kind", "main"))
         render_time = self._quantize(start)
-        key = self._frame_key(clip_path, render_time, segments, kind, clip, clip_progress)
+        key = self._frame_key(clip_path, render_time, clip, clip_progress)
         if key == self._last_render_key:
             return None
         cached = self._cache.get(key)
@@ -257,21 +260,8 @@ class PreviewEngineWorker(QObject):
             self._cache.move_to_end(key)
             self._last_render_key = key
             return cached
-        frame_path = render_ass_preview_frame(
-            clip_path,
-            render_time,
-            segments=segments,
-            kind=kind,
-            main_y=int(self.config.get("main_y", 1180) or 1180),
-            addr_y=int(self.config.get("addr_y", 1390) or 1390),
-            video_template=str(self.config.get("video_template", "Basic Subtitle") or "Basic Subtitle"),
-            template_config=self.config.get("template_config") if isinstance(self.config.get("template_config"), dict) else {},
-            motion=str(clip.get("motion", "none")),
-            clip_progress=clip_progress,
-            font_dir=Path(str(self.config.get("font_dir", ""))).expanduser() if self.config.get("font_dir") else None,
-        )
-        image = QImage(str(frame_path))
-        if image.isNull():
+        image = self._decode_video_frame(clip_path, render_time)
+        if image is None or image.isNull():
             return None
         self._remember_frame(key, image)
         self._last_render_key = key
@@ -342,8 +332,6 @@ class PreviewEngineWorker(QObject):
         self,
         clip_path: Path,
         timestamp: float,
-        segments: list[list[str]],
-        kind: str,
         clip: dict,
         progress: float,
     ) -> str:
@@ -358,17 +346,63 @@ class PreviewEngineWorker(QObject):
                 str(clip_path),
                 stat,
                 f"{timestamp:.3f}",
-                repr(segments),
-                kind,
-                str(self.config.get("main_y", 1180)),
-                str(self.config.get("addr_y", 1390)),
-                str(self.config.get("video_template", "Basic Subtitle")),
-                repr(self.config.get("template_config", {})),
-                str(self.config.get("font_dir", "")),
                 str(clip.get("motion", "none")),
                 f"{progress:.3f}",
             ]
         )
+
+    def _decode_video_frame(self, clip_path: Path, timestamp: float) -> QImage | None:
+        try:
+            import av
+        except Exception:
+            frame_path = extract_preview_frame(clip_path, timestamp)
+            image = QImage(str(frame_path))
+            return image if not image.isNull() else None
+
+        path_key = str(clip_path)
+        if self._container is None or self._container_path != path_key:
+            self._close_container()
+            self._container = av.open(path_key)
+            self._stream = self._container.streams.video[0]
+            self._stream.thread_type = "AUTO"
+            self._container_path = path_key
+            self._last_source_time = -1.0
+
+        if self._container is None or self._stream is None:
+            return None
+
+        if timestamp < self._last_source_time or timestamp - self._last_source_time > 0.75:
+            seek_target = int(max(0.0, timestamp) / float(self._stream.time_base))
+            self._container.seek(seek_target, any_frame=False, backward=True, stream=self._stream)
+
+        best = None
+        for frame in self._container.decode(self._stream):
+            pts = float(frame.pts * self._stream.time_base) if frame.pts is not None else timestamp
+            best = frame
+            if pts + 0.001 >= timestamp:
+                self._last_source_time = pts
+                break
+        if best is None:
+            return None
+        return self._frame_to_qimage(best)
+
+    def _frame_to_qimage(self, frame) -> QImage:
+        array = frame.to_ndarray(format="rgba")
+        height, width, _channels = array.shape
+        qimage = QImage(array.data, width, height, width * 4, QImage.Format_RGBA8888)
+        return qimage.copy()
+
+    def _close_container(self) -> None:
+        container = self._container
+        self._container = None
+        self._stream = None
+        self._container_path = ""
+        self._last_source_time = -1.0
+        if container is not None:
+            try:
+                container.close()
+            except Exception:
+                pass
 
     def _remember_frame(self, key: str, image: QImage) -> None:
         self._cache[key] = image

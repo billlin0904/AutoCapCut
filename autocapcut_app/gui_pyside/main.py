@@ -2448,6 +2448,7 @@ class MainWindow(QMainWindow):
             self.timeline_slider.setValue(timeline_ms)
             self.timeline_slider.blockSignals(False)
             self.update_time_label()
+        self.update_playback_caption_overlay(timeline_sec)
 
     def preview_engine_finished(self) -> None:
         self.media_player.pause()
@@ -2501,7 +2502,9 @@ class MainWindow(QMainWindow):
             self.timeline_slider.setValue(timeline_ms)
             self.timeline_slider.blockSignals(False)
             self.update_time_label()
-        self.preview.set_background_image(image, has_captions=True)
+        in_intro = self.rendered_to_source_seconds(source_seconds) is None
+        self.update_playback_caption_overlay(source_seconds)
+        self.preview.set_background_image(image, has_captions=in_intro)
         if timeline_ms >= self.timeline_slider.maximum():
             self.preview_engine_pause.emit()
             self.media_player.pause()
