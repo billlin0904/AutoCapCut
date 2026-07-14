@@ -249,8 +249,26 @@ CAPTION_TEMPLATES = {
 }
 
 
+def needs_segment_space(left: str, right: str) -> bool:
+    if not left or not right:
+        return False
+    if left[-1].isspace() or right[0].isspace():
+        return False
+    if left[-1] in "/-–—([{（「『" or right[0] in "/-–—,.;:!?)]}）」』":
+        return False
+    return left[-1].isascii() and right[0].isascii() and left[-1].isalnum() and right[0].isalnum()
+
+
 def caption_text_from_segments(segments: list[list[str]]) -> str:
-    return "".join(str(segment[0]) for segment in segments if segment)
+    parts: list[str] = []
+    for segment in segments:
+        if not segment:
+            continue
+        text = str(segment[0])
+        if parts and needs_segment_space(parts[-1], text):
+            parts.append(" ")
+        parts.append(text)
+    return "".join(parts)
 
 
 def caption_color_from_segments(segments: list[list[str]]) -> str:
@@ -2107,10 +2125,10 @@ class MainWindow(QMainWindow):
         text_item = self.caption_table.item(row, 3)
         if text_item is None:
             return []
-        text = text_item.text().strip()
+        text = text_item.text()
         color_combo = self.caption_table.cellWidget(row, 4)
         color = combo_value(color_combo if isinstance(color_combo, QComboBox) else None, "w")
-        return self.normalize_segments([[text, color]]) if text else []
+        return self.normalize_segments([[text, color]]) if text != "" else []
 
     def caption_row_emphasis(self, row: int) -> list[str]:
         item = self.caption_table.item(row, 6)
