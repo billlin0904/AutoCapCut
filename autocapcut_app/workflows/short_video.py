@@ -1132,6 +1132,28 @@ def _adjust_caps_for_xfade(
     return adjusted
 
 
+def _effective_xfade_duration(
+    durations: list[float],
+    requested: float,
+    enabled: bool,
+    log: LogFn | None,
+) -> float:
+    if not enabled or len(durations) <= 1:
+        return 0.0
+    positive = [duration for duration in durations if duration > 0]
+    if len(positive) != len(durations):
+        return 0.0
+    shortest = min(positive)
+    max_safe = max(0.0, shortest * 0.45)
+    if max_safe < 0.1:
+        _log(log, f"XFade disabled: shortest clip is too short ({shortest:.2f}s).")
+        return 0.0
+    effective = max(0.1, min(requested, max_safe))
+    if effective < requested - 0.001:
+        _log(log, f"XFade duration clamped from {requested:.2f}s to {effective:.2f}s for short clips.")
+    return effective
+
+
 def _render_food_travel_xfade(job: ShortVideoJob, log: LogFn | None, video_encoder: str, video_quality: str) -> Path:
     import silent_vlog_maker.effects as effects
     import silent_vlog_maker.shorts_vertical as shorts_vertical
@@ -1147,8 +1169,12 @@ def _render_food_travel_xfade(job: ShortVideoJob, log: LogFn | None, video_encod
     original_caps = caps
     durations = [duration for _, _, duration in segs]
     clip_transition_enabled = any((clip.transition or "inherit").strip().lower() == "xfade" for clip in job.clips)
-    usable_xfade = len(segs) > 1 and all(duration > configured_xfade_duration + 0.2 for duration in durations)
-    xfade_duration = configured_xfade_duration if usable_xfade and (transition == "xfade" or clip_transition_enabled) else 0.0
+    xfade_duration = _effective_xfade_duration(
+        durations,
+        configured_xfade_duration,
+        transition == "xfade" or clip_transition_enabled,
+        log,
+    )
     if xfade_duration:
         caps = _adjust_caps_for_xfade(caps, durations, xfade_duration)
     total = sum(durations) - max(0, len(durations) - 1) * xfade_duration
