@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import QObject, QTimer, Signal, Slot
-from PySide6.QtGui import QImage
+from PySide6.QtGui import QImage, QPainter
 
 from autocapcut_app.core.template_config import normalize_template_config
 from autocapcut_app.core.video_grade import video_grade_filter
@@ -244,6 +244,36 @@ class PreviewEngineWorker(QObject):
         return self._clamp_time(self._current_timeline + elapsed)
 
     def _render_timeline_frame(self, timeline_sec: float) -> QImage | None:
+        transition = self._transition_detail_at_timeline_time(timeline_sec)
+        if transition is not None:
+            clip_a, time_a, progress_a, clip_b, time_b, progress_b, mix = transition
+            path_a = Path(str(clip_a.get("path", "")))
+            path_b = Path(str(clip_b.get("path", "")))
+            if path_a.exists() and path_b.exists():
+                time_a = self._quantize(time_a)
+                time_b = self._quantize(time_b)
+                key = "xfade|" + "|".join(
+                    [
+                        self._frame_key(path_a, time_a, clip_a, progress_a),
+                        self._frame_key(path_b, time_b, clip_b, progress_b),
+                        f"{mix:.3f}",
+                    ]
+                )
+                if key == self._last_render_key:
+                    return None
+                cached = self._cache.get(key)
+                if cached is not None:
+                    self._cache.move_to_end(key)
+                    self._last_render_key = key
+                    return cached
+                image_a = self._decode_video_frame(path_a, time_a)
+                image_b = self._decode_video_frame(path_b, time_b)
+                if image_a is not None and image_b is not None and not image_a.isNull() and not image_b.isNull():
+                    image = self._blend_images(image_a, image_b, mix)
+                    self._remember_frame(key, image)
+                    self._last_render_key = key
+                    return image
+
         detail = self._clip_detail_at_timeline_time(timeline_sec)
         if detail is None:
             return self._render_intro_frame(timeline_sec)
@@ -307,6 +337,69 @@ class PreviewEngineWorker(QObject):
                 return clip, start, progress
             cursor += duration
         return None
+
+    def _transition_detail_at_timeline_time(
+        self,
+        timeline_sec: float,
+    ) -> tuple[dict, float, float, dict, float, float, float] | None:
+        xfade_duration = self._preview_xfade_duration()
+        if xfade_duration <= 0:
+            return None
+        source_sec = self._rendered_to_source_seconds(timeline_sec)
+        if source_sec is None:
+            return None
+        clips = self.config.get("clips", []) or []
+        if len(clips) < 2:
+            return None
+        cursor = 0.0
+        for index in range(len(clips) - 1):
+            current = clips[index]
+            next_clip = clips[index + 1]
+            duration = max(0.0, float(current.get("duration", 0.0) or 0.0))
+            next_duration = max(0.0, float(next_clip.get("duration", 0.0) or 0.0))
+            if duration <= xfade_duration + 0.05 or next_duration <= 0:
+                cursor += duration
+                continue
+            boundary = cursor + duration
+            if boundary - xfade_duration <= source_sec < boundary:
+                mix = (source_sec - (boundary - xfade_duration)) / xfade_duration
+                mix = max(0.0, min(1.0, mix))
+                offset_a = max(0.0, duration - xfade_duration + mix * xfade_duration)
+                offset_b = min(next_duration, mix * min(xfade_duration, next_duration))
+                start_a = max(0.0, float(current.get("start", 0.0) or 0.0)) + offset_a
+                start_b = max(0.0, float(next_clip.get("start", 0.0) or 0.0)) + offset_b
+                progress_a = 0.0 if duration <= 0 else offset_a / duration
+                progress_b = 0.0 if next_duration <= 0 else offset_b / next_duration
+                return current, start_a, progress_a, next_clip, start_b, progress_b, mix
+            cursor += duration
+        return None
+
+    def _preview_xfade_duration(self) -> float:
+        template_config = self.config.get("template_config", {})
+        video_config = template_config.get("video", {}) if isinstance(template_config, dict) else {}
+        project_transition = str(video_config.get("transition", "hard_cut") or "hard_cut").strip().lower()
+        clip_transition = any(
+            str(clip.get("transition", "inherit") or "inherit").strip().lower() == "xfade"
+            for clip in self.config.get("clips", []) or []
+        )
+        if project_transition != "xfade" and not clip_transition:
+            return 0.0
+        return max(0.1, min(3.0, float(video_config.get("transition_duration", 0.8) or 0.8)))
+
+    def _blend_images(self, first: QImage, second: QImage, amount: float) -> QImage:
+        amount = max(0.0, min(1.0, amount))
+        base = first.convertToFormat(QImage.Format_RGBA8888)
+        overlay = second.convertToFormat(QImage.Format_RGBA8888)
+        if overlay.size() != base.size():
+            overlay = overlay.scaled(base.size())
+        out = QImage(base.size(), QImage.Format_RGBA8888)
+        out.fill(0)
+        painter = QPainter(out)
+        painter.drawImage(0, 0, base)
+        painter.setOpacity(amount)
+        painter.drawImage(0, 0, overlay)
+        painter.end()
+        return out
 
     def _caption_at_output_time(self, timeline_sec: float) -> dict | None:
         source_sec = self._rendered_to_source_seconds(timeline_sec)
