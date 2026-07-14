@@ -674,7 +674,11 @@ def _with_caption_style(shorts_vertical, job: ShortVideoJob, callback) -> None:
 
 
 def _render_with_shorts_vertical(job: ShortVideoJob, log: LogFn | None, video_encoder: str, video_quality: str) -> Path:
-    if job.bgm is None:
+    config = normalize_template_config(job.video_template, job.template_config)
+    video = config.get("video", {}) if isinstance(config, dict) else {}
+    video_grade = str(video.get("grade", "none")).strip().lower()
+    video_transition = str(video.get("transition", "hard_cut")).strip().lower()
+    if job.bgm is None or _should_use_effect_renderer(job, video_grade, video_transition):
         return _render_food_travel_xfade(job, log, video_encoder, video_quality)
 
     import silent_vlog_maker.shorts_vertical as shorts_vertical
@@ -1097,6 +1101,16 @@ def _job_has_clip_effects(job: ShortVideoJob) -> bool:
     return False
 
 
+def _should_use_effect_renderer(job: ShortVideoJob, video_grade: str, video_transition: str) -> bool:
+    template = job.video_template.strip().lower()
+    return (
+        is_video_grade_enabled(video_grade)
+        or video_transition == "xfade"
+        or template == "food/travel short"
+        or _job_has_clip_effects(job)
+    )
+
+
 def _adjust_caps_for_xfade(
     caps: list[tuple[float, float, list[tuple[str, str]], str]],
     original_durations: list[float],
@@ -1334,8 +1348,11 @@ def run_short_video_job(job: ShortVideoJob, log: LogFn | None = None) -> Path:
                 clips=[hook, *job.clips],
                 captions=styled,
             )
-            _render_with_shorts_vertical(render_job, log, video_encoder, video_quality)
-        elif is_video_grade_enabled(video_grade) or video_transition == "xfade" or template == "food/travel short" or _job_has_clip_effects(job):
+            if _should_use_effect_renderer(render_job, video_grade, video_transition):
+                _render_food_travel_xfade(render_job, log, video_encoder, video_quality)
+            else:
+                _render_with_shorts_vertical(render_job, log, video_encoder, video_quality)
+        elif _should_use_effect_renderer(job, video_grade, video_transition):
             render_job = _job_variant(work_job, captions=_apply_caption_strategy(job.captions, caption_strategy))
             _render_food_travel_xfade(render_job, log, video_encoder, video_quality)
         else:
