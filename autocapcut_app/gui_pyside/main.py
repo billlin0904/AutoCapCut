@@ -931,7 +931,7 @@ class MainWindow(QMainWindow):
         workspace.setSpacing(0)
 
         self.caption_box = self._build_caption_box()
-        self.caption_box.setFixedWidth(520)
+        self.caption_box.setFixedWidth(720)
         workspace.addWidget(self.caption_box)
 
         stage = QWidget()
@@ -1418,6 +1418,14 @@ class MainWindow(QMainWindow):
         self.caption_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeToContents)
         self.caption_table.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeToContents)
         self.caption_table.horizontalHeader().setSectionResizeMode(7, QHeaderView.ResizeToContents)
+        self.caption_table.setColumnWidth(0, 64)
+        self.caption_table.setColumnWidth(1, 64)
+        self.caption_table.setColumnWidth(2, 74)
+        self.caption_table.setColumnWidth(3, 180)
+        self.caption_table.setColumnWidth(4, 82)
+        self.caption_table.setColumnWidth(5, 92)
+        self.caption_table.setColumnWidth(6, 110)
+        self.caption_table.setColumnWidth(7, 92)
         self.caption_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.caption_table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.caption_table.setAlternatingRowColors(False)
